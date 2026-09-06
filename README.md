@@ -37,7 +37,7 @@ resizable vector layers and preserves the monitor's native pixels on scaled disp
   mesh-gradient backdrops, and rendered drop shadows on standard backdrop cards.
 - Cut tool: drag across a band of the image to remove it and collapse the gap, with a
   live preview and dashed seam marker while dragging; annotations shift to follow.
-- Pin a finished capture as a bottom-right always-on-top layer surface, launched
+- Pin a finished capture as a bottom-left always-on-top layer surface, launched
   from the same `omasnap` executable and visible on every workspace.
 - Crash-resistant working documents under `/run/user/<UID>/omasnap/` (falling back to
   a private `/tmp/omasnap-<UID>/`): the original source image plus a sidecar JSON
@@ -396,11 +396,10 @@ without reaching for the pointer.
 
 `P` renders the current capture, writes it to a `pin-<pid>-<n>-<random>.png` under
 the runtime snapshot directory, and launches the same `omasnap` executable in
-detached pin mode. Active pins stack from the bottom-right and can be dragged
-by the image background. The layer stays visible on every workspace without
-compositor window rules. It preserves the image
-aspect ratio, with a maximum width of one third of the screen and a maximum height of one
-half.
+detached pin mode. Active pins stack upward from the bottom-left, wrapping into
+columns to the right. Drag the image background to move a preview. The layer
+stays visible on every workspace without compositor window rules and preserves
+the image aspect ratio inside a fixed 250×200 preview.
 
 Pinning neither touches the clipboard nor writes to the screenshot directory; it is a
 fourth output alongside copy, save, and copy-and-save. `P` closes the editor and releases
@@ -411,11 +410,12 @@ Hover the pin to reveal its controls:
 
 | Input on a pin | Action |
 |---|---|
+| Drag the image background | Move the preview within its screen |
 | Edit button | Reopen the full-resolution PNG in Omasnap and replace the pin |
 | Link button | Copy the source file path |
 | Copy button, `Ctrl+C` | Copy the full-resolution PNG |
-| Double-wide top-left drag handle | Drag the PNG into a file-capable drop target |
-| Wheel | Resize within the screen caps, preserving aspect ratio |
+| Double-wide top-left drag handle | Click and drag the PNG into a file-capable drop target |
+| Wheel | Keep the preview at its fixed size |
 | Close button, `Esc`, middle-click | Close |
 
 Image and path copying use `wl-copy` rather than `QClipboard`, so clipboard data remains

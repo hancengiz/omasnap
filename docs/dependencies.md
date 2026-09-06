@@ -33,7 +33,7 @@ no user-visible benefit.
 
 | Process | Used for | Required? |
 |---|---|---|
-| `hyprctl` | Monitor/window discovery (`-j` JSON), natural-scroll policy query | Yes — see [platform-scope.md](platform-scope.md) |
+| `hyprctl` | Monitor/window discovery (`-j` JSON), natural-scroll policy query, pointer position while moving pins | Yes — see [platform-scope.md](platform-scope.md) |
 | `wl-copy` / `wl-paste` | Writing PNG/text to the Wayland clipboard, and verifying the write | Yes |
 | `tesseract` | OCR text recognition | Only if OCR is used; missing tesseract fails just that action |
 | `omarchy-notification-send` | Capture-finished notifications | No — falls back silently if absent (checked with `command -v` semantics via failed `QProcess::startDetached`) |

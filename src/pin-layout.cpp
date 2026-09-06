@@ -16,8 +16,7 @@ QPoint pinSlotPosition(const QSize &screenSize, const QSize &pinSize,
   const int rows = std::max(1, (verticalSpace + gap) / rowHeight);
   const int row = std::max(0, index) % rows;
   const int column = std::max(0, index) / rows;
-  const int x = screenSize.width() - margin - pinSize.width() -
-                column * (std::max(1, slotSize.width()) + gap);
+  const int x = margin + column * (std::max(1, slotSize.width()) + gap);
   const int y =
       screenSize.height() - margin - pinSize.height() - row * rowHeight;
   return {x, y};

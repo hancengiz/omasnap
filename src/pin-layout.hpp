@@ -5,6 +5,7 @@
 #include <QRect>
 #include <QSize>
 
+/** globalPointer must come from the compositor, not Qt's synthetic globals. */
 [[nodiscard]] QPoint pinPositionFromGlobalPointer(const QPoint &globalPointer,
                                                   const QPoint &screenOrigin,
                                                   const QPoint &pressOffset);

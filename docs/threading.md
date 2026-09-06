@@ -56,6 +56,15 @@ frames come in, however slow the compositor's damage-driven capture is.
 
 ## Pointer motion on large monitors
 
+Pinned previews query `hyprctl -j cursorpos` on a worker while the image
+background is held, with at most one query in flight per pin and a 16 ms
+timer. Qt's global coordinates for layer surfaces are synthetic; accumulating
+local deltas also feeds Hyprland's move animations back into the movement.
+The compositor's logical coordinates avoid both problems. Releasing stops
+the timer and requests a final position; idle pins do not poll. Pin attachment
+PNG bytes and a small preview are prepared on a worker before file dragging,
+so starting a drag never encodes a full-resolution screenshot on the UI thread.
+
 Input and `QWidget` painting necessarily share Qt's GUI thread, but pointer
 motion must not turn into a full-surface render. This matters on a 6K display:
 a single full ARGB frame is over 80 MB before compositor copies.

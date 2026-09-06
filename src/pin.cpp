@@ -9,9 +9,13 @@
 #include <QBuffer>
 #include <QDrag>
 #include <QEnterEvent>
+#include <QFile>
 #include <QFontMetrics>
+#include <QFutureWatcher>
 #include <QGuiApplication>
 #include <QImage>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QKeyEvent>
 #include <QMimeData>
 #include <QMouseEvent>
@@ -27,8 +31,10 @@
 #include <QWheelEvent>
 #include <QWidget>
 #include <QWindow>
+#include <QtConcurrent/QtConcurrentRun>
 
 #include <algorithm>
+#include <optional>
 #include <utility>
 
 namespace {
@@ -46,6 +52,49 @@ constexpr qreal kControlsHeight = 36;
 constexpr int kPinWidth = 250;
 constexpr int kPinHeight = 200;
 
+struct PinDragData {
+  QByteArray png;
+  QImage preview;
+};
+
+PinDragData prepareDragData(const QImage &image, const QString &path) {
+  PinDragData data;
+  QFile file(path);
+  if (file.open(QIODevice::ReadOnly)) {
+    // Pins normally already have a PNG on disk; reuse its encoded bytes.
+    if (file.peek(8) == QByteArray::fromHex("89504e470d0a1a0a"))
+      data.png = file.readAll();
+  }
+  if (data.png.isEmpty()) {
+    QBuffer buffer(&data.png);
+    buffer.open(QIODevice::WriteOnly);
+    image.save(&buffer, "PNG");
+  }
+  data.preview = image.scaled(256, 256, Qt::KeepAspectRatio,
+                              Qt::SmoothTransformation);
+  return data;
+}
+
+// Qt synthesizes global pointer coordinates for layer surfaces, and local
+// deltas feed compositor move animations back into the next requested move.
+// Ask Hyprland for the real logical coordinates, on a worker with a bounded
+// timeout. There is at most one query in flight, and none while pins are idle.
+std::optional<QPoint> queryPointerPosition() {
+  QProcess process;
+  process.start(QStringLiteral("hyprctl"),
+                {QStringLiteral("-j"), QStringLiteral("cursorpos")});
+  if (!process.waitForFinished(200) || process.exitStatus() != QProcess::NormalExit ||
+      process.exitCode() != 0)
+    return std::nullopt;
+  const QJsonObject point =
+      QJsonDocument::fromJson(process.readAllStandardOutput()).object();
+  if (!point.value(QStringLiteral("x")).isDouble() ||
+      !point.value(QStringLiteral("y")).isDouble())
+    return std::nullopt;
+  return QPoint(point.value(QStringLiteral("x")).toInt(),
+                point.value(QStringLiteral("y")).toInt());
+}
+
 class PinWindow final : public QWidget {
 public:
   explicit PinWindow(QImage image, QString path)
@@ -53,7 +102,37 @@ public:
     setWindowTitle(QStringLiteral("omasnap-pin"));
     setWindowFlags(Qt::Window | Qt::FramelessWindowHint);
     setAttribute(Qt::WA_TranslucentBackground);
+    setMouseTracking(true);
     resize(initialSize());
+    connect(&dragDataWatcher_, &QFutureWatcher<PinDragData>::finished, this, [this] {
+      dragData_ = dragDataWatcher_.result();
+      update();
+    });
+    dragDataWatcher_.setFuture(QtConcurrent::run(
+        [image = image_, path = path_] { return prepareDragData(image, path); }));
+    dragTimer_.setInterval(16);
+    connect(&dragTimer_, &QTimer::timeout, this, &PinWindow::queryDragPosition);
+    connect(&dragWatcher_, &QFutureWatcher<std::optional<QPoint>>::finished, this, [this] {
+      dragQueryPending_ = false;
+      const auto pointer = dragWatcher_.result();
+      if (queryGesture_ == dragGesture_) {
+        if (pointer) {
+          const QScreen *target = screen();
+          const QPoint origin = target ? target->geometry().topLeft() : QPoint();
+          const QPoint requested = pinPositionFromGlobalPointer(
+              *pointer, origin, dragOffset_);
+          const QRect bounds(QPoint(), availableSize());
+          applyPosition(clampPinGeometry(QRect(requested, size()), bounds).topLeft());
+        } else {
+          dragging_ = false;
+          dragTimer_.stop();
+          finalDragQuery_ = false;
+          showToast(QStringLiteral("Could not read pointer position"));
+        }
+      }
+      if (finalDragQuery_)
+        queryDragPosition();
+    });
   }
 
   [[nodiscard]] bool hasPinLock() const {
@@ -66,6 +145,21 @@ public:
     const QScreen *target =
         screen() ? screen() : QGuiApplication::primaryScreen();
     return target ? target->availableGeometry().size() : QSize(1920, 1080);
+  }
+
+  void applyPosition(QPoint position) {
+    if (QWindow *handle = windowHandle()) {
+      if (LayerShellQt::Window *layer = LayerShellQt::Window::get(handle)) {
+        const QMargins margins(position.x(), 0, 0,
+                                availableSize().height() - position.y() - height());
+        if (layer->margins() == margins)
+          return;
+        layer->setMargins(margins);
+        // Layer-shell margins are double-buffered. A paint commits them;
+        // without it the pin only jumps on a later hover/leave repaint.
+        update();
+      }
+    }
   }
 
 protected:
@@ -158,12 +252,20 @@ protected:
     }
     const QPointF position = event->position();
     if (event->button() == Qt::LeftButton) {
+      ++dragGesture_;
+      finalDragQuery_ = false;
       if (closeButtonRect().contains(position)) {
         close();
         return;
       }
       if (dragButtonRect().contains(position)) {
-        beginFileDrag();
+        if (dragData_.preview.isNull()) {
+          showToast(QStringLiteral("Preparing image to drag"));
+          return;
+        }
+        fileDragPending_ = true;
+        dragOffset_ = position.toPoint();
+        event->accept();
         return;
       }
       if (copyButtonRect().contains(position)) {
@@ -186,6 +288,8 @@ protected:
       }
       dragging_ = true;
       dragOffset_ = position.toPoint();
+      setCursor(Qt::ClosedHandCursor);
+      dragTimer_.start();
       event->accept();
     }
   }
@@ -202,22 +306,26 @@ protected:
 
   void mouseMoveEvent(QMouseEvent *event) override {
     const QPointF position = event->position();
+    if (!(event->buttons() & Qt::LeftButton)) {
+      dragging_ = false;
+      fileDragPending_ = false;
+      dragTimer_.stop();
+    }
+    if (fileDragPending_) {
+      if ((position.toPoint() - dragOffset_).manhattanLength() >=
+          QApplication::startDragDistance()) {
+        fileDragPending_ = false;
+        beginFileDrag();
+      }
+      event->accept();
+      return;
+    }
     if (dragging_) {
-      const QScreen *target =
-          screen() ? screen() : QGuiApplication::primaryScreen();
-      const QPoint origin =
-          target ? target->availableGeometry().topLeft() : QPoint();
-      const QRect bounds(QPoint(),
-                         target ? target->availableGeometry().size()
-                                : availableSize());
-      const QPoint requested = pinPositionFromGlobalPointer(
-          event->globalPosition().toPoint(), origin, dragOffset_);
-      applyPosition(clampPinGeometry(QRect(requested, size()), bounds).topLeft());
       event->accept();
       return;
     }
     setCursor(controlRectAt(position) >= 0 ? Qt::PointingHandCursor
-                                           : Qt::ArrowCursor);
+                                           : Qt::OpenHandCursor);
 
     const int control = controlRectAt(position);
     if (control != hoveredControl_) {
@@ -228,8 +336,17 @@ protected:
   }
 
   void mouseReleaseEvent(QMouseEvent *event) override {
-    if (event->button() == Qt::LeftButton)
+    if (event->button() == Qt::LeftButton) {
+      if (dragging_) {
+        finalDragQuery_ = true;
+        queryDragPosition();
+      }
       dragging_ = false;
+      dragTimer_.stop();
+      fileDragPending_ = false;
+      setCursor(controlRectAt(event->position()) >= 0 ? Qt::PointingHandCursor
+                                                      : Qt::OpenHandCursor);
+    }
     QWidget::mouseReleaseEvent(event);
   }
 
@@ -240,17 +357,13 @@ protected:
     const QList<QUrl> urls{QUrl::fromLocalFile(path_)};
     mime->setUrls(urls);
     mime->setText(urls.constFirst().toLocalFile());
-    QByteArray pngData;
-    QBuffer buffer(&pngData);
-    buffer.open(QIODevice::WriteOnly);
-    if (image_.save(&buffer, "PNG"))
-      mime->setData(QStringLiteral("image/png"), pngData);
+    if (!dragData_.png.isEmpty())
+      mime->setData(QStringLiteral("image/png"), dragData_.png);
 
     QDrag drag(this);
     drag.setMimeData(mime);
-    drag.setPixmap(QPixmap::fromImage(image_.scaled(
-        256, 256, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
-    drag.exec(Qt::CopyAction | Qt::MoveAction);
+    drag.setPixmap(QPixmap::fromImage(dragData_.preview));
+    drag.exec(Qt::CopyAction);
   }
 
   void wheelEvent(QWheelEvent *event) override {
@@ -289,6 +402,17 @@ protected:
   }
 
 private:
+  void queryDragPosition() {
+    // isRunning() can be false before the finished signal is delivered.
+    // Keep the result's gesture id intact until that signal has been handled.
+    if (dragQueryPending_)
+      return;
+    finalDragQuery_ = false;
+    dragQueryPending_ = true;
+    queryGesture_ = dragGesture_;
+    dragWatcher_.setFuture(QtConcurrent::run(queryPointerPosition));
+  }
+
   [[nodiscard]] QString controlTip(int index) const {
     switch (index) {
     case 0:
@@ -319,17 +443,6 @@ private:
     });
   }
 
-  void applyPosition(QPoint position) {
-    position_ = position;
-    if (QWindow *handle = windowHandle()) {
-      if (LayerShellQt::Window *layer = LayerShellQt::Window::get(handle)) {
-        const QSize available = availableSize();
-        layer->setMargins(
-            QMargins(0, 0, available.width() - position.x() - width(),
-                     available.height() - position.y() - height()));
-      }
-    }
-  }
   // The wide drag handle stands alone in the top-left; edit, path, copy, and
   // close remain grouped in the top-right.
   [[nodiscard]] QRectF closeButtonRect() const { return controlRect(0); }
@@ -361,12 +474,20 @@ private:
   }
 
   QImage image_;
+  PinDragData dragData_;
+  QFutureWatcher<PinDragData> dragDataWatcher_;
   QString path_;
   PinSnapshotFile snapshotFile_;
   PinSlotLock slotLock_;
-  QPoint position_;
   QPoint dragOffset_;
+  QTimer dragTimer_;
+  QFutureWatcher<std::optional<QPoint>> dragWatcher_;
+  quint64 dragGesture_ = 0;
+  quint64 queryGesture_ = 0;
+  bool dragQueryPending_ = false;
+  bool finalDragQuery_ = false;
   bool dragging_ = false;
+  bool fileDragPending_ = false;
   QString toast_;
   QString hoverTip_;
   bool hovered_ = false;
@@ -399,16 +520,13 @@ int runPinnedCapture(const QString &path) {
   layer->setScope(QStringLiteral("omasnap-pin"));
   LayerShellQt::Window::Anchors anchors;
   anchors.setFlag(LayerShellQt::Window::AnchorBottom);
-  anchors.setFlag(LayerShellQt::Window::AnchorRight);
+  anchors.setFlag(LayerShellQt::Window::AnchorLeft);
   layer->setAnchors(anchors);
   const QPoint slot = pinSlotPosition(window.availableSize(), window.size(),
                                       window.size(), window.slotIndex(),
                                       kPinGap, kCornerMargin);
-  layer->setMargins(QMargins(0, 0,
-                             window.availableSize().width() - slot.x() -
-                                 window.width(),
-                             window.availableSize().height() - slot.y() -
-                                 window.height()));
+  const QRect bounds(QPoint(), window.availableSize());
+  window.applyPosition(clampPinGeometry(QRect(slot, window.size()), bounds).topLeft());
   layer->setExclusiveZone(0);
   layer->setDesiredSize(window.size());
   layer->setKeyboardInteractivity(

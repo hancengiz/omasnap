@@ -4,12 +4,22 @@
 #include "pin-layout.hpp"
 
 bool runPinLayoutSmoke(QString &error) {
+  // Use compositor coordinates, including a monitor with a nonzero origin.
   const QPoint firstDrag = pinPositionFromGlobalPointer(
       QPoint(446, 306), QPoint(100, 50), QPoint(50, 40));
   const QPoint secondDrag = pinPositionFromGlobalPointer(
       QPoint(456, 316), QPoint(100, 50), QPoint(50, 40));
   if (firstDrag != QPoint(296, 216) || secondDrag != QPoint(306, 226)) {
-    error = QStringLiteral("Pin drag did not follow the global pointer");
+    error = QStringLiteral("Pin drag did not follow the compositor pointer");
+    return false;
+  }
+  // Logical coordinates must not be rescaled, even on an offset, scaled
+  // output. Layer-shell margins and hyprctl cursorpos both use logical pixels.
+  if (pinPositionFromGlobalPointer(QPoint(694, 646), QPoint(480, 0),
+                                   QPoint(100, 100)) != QPoint(114, 546) ||
+      pinPositionFromGlobalPointer(QPoint(-1200, 400), QPoint(-1536, 0),
+                                   QPoint(36, 100)) != QPoint(300, 300)) {
+    error = QStringLiteral("Pin drag mishandled an offset monitor");
     return false;
   }
 
@@ -19,8 +29,8 @@ bool runPinLayoutSmoke(QString &error) {
   const QPoint second = pinSlotPosition(screen, pin, pin, 1, 10, 14);
   const QPoint third = pinSlotPosition(screen, pin, pin, 2, 10, 14);
   const QPoint wrapped = pinSlotPosition(screen, pin, pin, 3, 10, 14);
-  if (first != QPoint(286, 206) || second != QPoint(286, 116) ||
-      third != QPoint(286, 26) || wrapped != QPoint(176, 206)) {
+  if (first != QPoint(14, 206) || second != QPoint(14, 116) ||
+      third != QPoint(14, 26) || wrapped != QPoint(124, 206)) {
     error = QStringLiteral("Pinned slots did not stack and wrap correctly");
     return false;
   }

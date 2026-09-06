@@ -90,7 +90,7 @@ change that touches the principle, not just this summary.
 | `src/cut.cpp/.hpp` | Cut-band tool: remove a strip and collapse the gap |
 | `src/recent-snaps.cpp/.hpp` | The recents shelf: shelving/reopening working documents |
 | `src/output-config.cpp/.hpp`, `src/palette-config.cpp/.hpp` | The optional `omasnap.conf` INI: output destination/filename, color presets |
-| `src/pin.cpp/.hpp`, `src/pin-file.cpp/.hpp`, `src/pin-layout.cpp/.hpp` | Pinned-capture layer-shell surfaces (bottom-right, all workspaces) |
+| `src/pin.cpp/.hpp`, `src/pin-file.cpp/.hpp`, `src/pin-layout.cpp/.hpp` | Pinned-capture layer-shell surfaces (bottom-left, all workspaces) |
 | `src/icons.cpp/.hpp` | Vector icon renderer for toolbar and pin controls |
 | `src/cli-path.cpp/.hpp` | Command-line image target resolution |
 | `src/eyedropper.cpp/.hpp` | Display-to-source color sampling |
