@@ -310,18 +310,11 @@ QString runtimePath(const QString &name) {
 }
 
 QString screenshotTargetPath(QString &error, const QString &appSlug) {
-  // Precedence: OMASNAP_SCREENSHOT_DIR, then [output] directory in the
-  // config, then ~/Pictures/Screenshots. The filename pattern comes from
-  // [output] filename; its default keeps the date first so the folder always
-  // sorts chronologically.
+  // Precedence lives in screenshotDirectory(); the filename pattern comes
+  // from [output] filename; its default keeps the date first so the folder
+  // always sorts chronologically.
   const OutputConfig config = loadOutputConfig(defaultConfigPath());
-  QString root = qEnvironmentVariable("OMASNAP_SCREENSHOT_DIR");
-  if (root.isEmpty())
-    root = config.directory;
-  if (root.isEmpty())
-    root =
-        QDir(QStandardPaths::writableLocation(QStandardPaths::PicturesLocation))
-            .filePath(QStringLiteral("Screenshots"));
+  const QString root = screenshotDirectory();
   if (!QDir().mkpath(root)) {
     error =
         QStringLiteral("Could not create screenshot directory: %1").arg(root);

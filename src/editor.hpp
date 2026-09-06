@@ -4,6 +4,7 @@
 #include "capture.hpp"
 #include "cut.hpp"
 #include "overlay-chrome.hpp"
+#include "output-config.hpp"
 #include "palette-config.hpp"
 #include "recent-snaps.hpp"
 
@@ -208,11 +209,14 @@ private:
     /// Small flattened preview for the recents shelf.
     QImage thumbnail;
   };
-  /// What reopening a shelved capture reads off disk: the full-resolution
-  /// source plus its operation log. Loaded on the worker pool, not the UI
-  /// thread, since a shelved stitched capture can be tens of megapixels.
+  /// What reopening a shelved capture or opening a picked image reads off
+  /// disk: the full-resolution source plus its operation log. Loaded on the
+  /// worker pool, not the UI thread, since a shelved stitched capture can be
+  /// tens of megapixels. `recent` is set for a shelf entry; a plain file open
+  /// carries only `requestedPath`.
   struct ReopenResult {
     RecentSnap recent;
+    QString requestedPath;
     QImage image;
     OperationLog log;
     QString error;
@@ -292,6 +296,20 @@ public:
   [[nodiscard]] QRectF recentCardRectForTest(int index) const;
   [[nodiscard]] int recentCountForTest() const {
     return static_cast<int>(recents_.size());
+  }
+  /// Whether the O-key open-image picker is up. Test accessor.
+  [[nodiscard]] bool openPickerForTest() const { return openPickerActive_; }
+  /// Blocks until the picker's directory listing has landed.
+  bool waitForOpenList();
+  /// Listed images, newest first. Test accessor.
+  [[nodiscard]] int openImageCountForTest() const {
+    return static_cast<int>(openImages_.size());
+  }
+  /// Path of listed image `index`. Test accessor.
+  [[nodiscard]] QString openImagePathForTest(int index) const {
+    return index >= 0 && index < openImages_.size()
+               ? openImages_.at(index).path
+               : QString();
   }
   /// Current status line. Test accessor.
   [[nodiscard]] QString statusForTest() const { return status_; }
@@ -515,7 +533,19 @@ private:
   void trackRecentsHover();
   void paintRecents(QPainter &painter);
   void reopenRecent(int index);
-  void completeReopenRecent(const ReopenResult &result);
+  void completeReopen(const ReopenResult &result);
+  /// The O-key open-image picker on the select overlay: a modal list of the
+  /// screenshot directory's images, newest first, opened in place of a new
+  /// capture through the same worker-pool reopen the shelf uses.
+  void beginOpenPicker();
+  void closeOpenPicker();
+  void openPickedImage(int index);
+  void ensureOpenCursorVisible();
+  [[nodiscard]] int openVisibleRows() const;
+  [[nodiscard]] QRectF openPanelRect() const;
+  [[nodiscard]] QRectF openRowRect(int index) const;
+  [[nodiscard]] int openRowAt(const QPointF &position) const;
+  void paintOpenPicker(QPainter &painter);
   void completeBackdropLoad();
   void seedConfiguredBackground(BackgroundStyle style);
   void duplicateSelectedAnnotation();
@@ -613,6 +643,16 @@ private:
   QVector<RecentSnap> recents_;
   QFutureWatcher<QVector<RecentSnap>> recentsWatcher_;
   bool recentsLoading_ = false;
+  // The O-key open-image picker: listing runs on the worker pool so a slow
+  // directory never stalls the overlay.
+  QFutureWatcher<QVector<EditableImage>> openListWatcher_;
+  bool openPickerActive_ = false;
+  bool openListLoading_ = false;
+  QVector<EditableImage> openImages_;
+  QString openDirectory_;
+  int openCursor_ = 0;
+  int openOffset_ = 0;
+  int hoveredOpenImage_ = -1;
   bool recentsOpen_ = false;
   int hoveredRecent_ = -1;
   /// 0 = stacked, 1 = fanned; eased between the two by recentsAnimTimer_.

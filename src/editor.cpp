@@ -208,6 +208,12 @@ constexpr qreal kRecentCardWidth = 112.0;
 constexpr qreal kRecentCardHeight = 84.0;
 constexpr qreal kRecentCardGap = 10.0;
 constexpr qreal kRecentEdgeMargin = 18.0;
+/// The open-image picker's panel (logical px): wide enough for screenshot
+/// names, never wider than the surface, and a window of rows over a list
+/// that can be far longer.
+constexpr qreal kOpenPanelWidth = 560.0;
+constexpr qreal kOpenRowHeight = 34.0;
+constexpr int kOpenMaxVisibleRows = 9;
 
 qreal toolbarScale(qreal availableWidth) {
   constexpr qreal sideMargins = 16.0;
@@ -758,7 +764,7 @@ CaptureEditor::CaptureEditor(CaptureData capture, CaptureMode mode,
           [this] { completeFinish(finishWatcher_.result()); });
 
   connect(&reopenWatcher_, &QFutureWatcher<ReopenResult>::finished, this,
-          [this] { completeReopenRecent(reopenWatcher_.result()); });
+          [this] { completeReopen(reopenWatcher_.result()); });
 
   connect(&snapshotWatcher_, &QFutureWatcher<bool>::finished, this, [this] {
     snapshotBusy_ = false;
@@ -904,9 +910,24 @@ CaptureEditor::CaptureEditor(CaptureData capture, CaptureMode mode,
     update();
   });
   connect(&recentsWatcher_, &QFutureWatcher<QVector<RecentSnap>>::finished,
+           this, [this] {
+             recentsLoading_ = false;
+             recents_ = recentsWatcher_.result();
+             if (phase_ == Phase::Select)
+               update();
+           });
+  connect(&openListWatcher_, &QFutureWatcher<QVector<EditableImage>>::finished,
           this, [this] {
-            recentsLoading_ = false;
-            recents_ = recentsWatcher_.result();
+            openListLoading_ = false;
+            openImages_ = openListWatcher_.result();
+            openCursor_ = 0;
+            openOffset_ = 0;
+            setStatus(openImages_.isEmpty()
+                          ? QStringLiteral("No images in %1 · Esc closes")
+                                .arg(openDirectory_)
+                          : QStringLiteral(
+                                "Open image · ↑↓ choose · Enter opens · Esc "
+                                "closes"));
             if (phase_ == Phase::Select)
               update();
           });
@@ -3639,6 +3660,43 @@ void CaptureEditor::keyPressEvent(QKeyEvent *event) {
     event->accept();
     return;
   }
+  // The open-image picker is modal on the select overlay: every key it does
+  // not consume still stops there, so no other binding fires under it.
+  if (phase_ == Phase::Select && openPickerActive_) {
+    const int key = event->key();
+    const int rows = static_cast<int>(openImages_.size());
+    if (key == Qt::Key_Escape || (key == Qt::Key_O && !event->modifiers())) {
+      closeOpenPicker();
+    } else if (rows > 0 && (key == Qt::Key_Return || key == Qt::Key_Enter)) {
+      openPickedImage(openCursor_);
+    } else if (rows > 0 && key == Qt::Key_Up) {
+      openCursor_ = (openCursor_ + rows - 1) % rows;
+      ensureOpenCursorVisible();
+      update();
+    } else if (rows > 0 && key == Qt::Key_Down) {
+      openCursor_ = (openCursor_ + 1) % rows;
+      ensureOpenCursorVisible();
+      update();
+    } else if (rows > 0 && key == Qt::Key_PageUp) {
+      openCursor_ = std::max(0, openCursor_ - openVisibleRows());
+      ensureOpenCursorVisible();
+      update();
+    } else if (rows > 0 && key == Qt::Key_PageDown) {
+      openCursor_ = std::min(rows - 1, openCursor_ + openVisibleRows());
+      ensureOpenCursorVisible();
+      update();
+    } else if (rows > 0 && key == Qt::Key_Home) {
+      openCursor_ = 0;
+      ensureOpenCursorVisible();
+      update();
+    } else if (rows > 0 && key == Qt::Key_End) {
+      openCursor_ = rows - 1;
+      ensureOpenCursorVisible();
+      update();
+    }
+    event->accept();
+    return;
+  }
   if (event->key() == Qt::Key_Shift && phase_ == Phase::Edit && dragging_) {
     // Shift pressed mid-drag constrains the drag: creation for drawing
     // tools, handle resizing for the Select tool.
@@ -3709,6 +3767,10 @@ void CaptureEditor::keyPressEvent(QKeyEvent *event) {
     }
     if (event->key() == Qt::Key_S && !event->modifiers()) {
       setScrollMode(!scrollMode_);
+      return;
+    }
+    if (event->key() == Qt::Key_O && !event->modifiers()) {
+      beginOpenPicker();
       return;
     }
     if (event->key() == Qt::Key_Space) {
@@ -4199,8 +4261,15 @@ void CaptureEditor::mouseMoveEvent(QMouseEvent *event) {
   if (capturePending_)
     return;
   if (phase_ == Phase::Select) {
-    if (!dragging_)
+    if (openPickerActive_) {
+      const int row = openRowAt(cursor_);
+      if (row != hoveredOpenImage_) {
+        hoveredOpenImage_ = row;
+        update();
+      }
+    } else if (!dragging_) {
       trackRecentsHover();
+    }
     if (windowMode_)
       hoveredWindow_ = recentsOpen_ ? -1 : windowAt(cursor_);
     else if (dragging_)
@@ -4570,6 +4639,15 @@ void CaptureEditor::mousePressEvent(QMouseEvent *event) {
     return;
   }
   if (phase_ == Phase::Select) {
+    if (openPickerActive_) {
+      // Modal: a row opens its image, anything outside the panel closes the
+      // picker, and no press starts a region drag while it is up.
+      if (const int row = openRowAt(cursor_); row >= 0)
+        openPickedImage(row);
+      else if (!openPanelRect().contains(cursor_))
+        closeOpenPicker();
+      return;
+    }
     trackRecentsHover();
     if (recentsOpen_) {
       if (const int recent = recentAt(cursor_); recent >= 0)
@@ -5125,6 +5203,19 @@ void CaptureEditor::mouseReleaseEvent(QMouseEvent *event) {
 }
 
 void CaptureEditor::wheelEvent(QWheelEvent *event) {
+  if (phase_ == Phase::Select && openPickerActive_ &&
+      openPanelRect().contains(event->position())) {
+    const int rows = static_cast<int>(openImages_.size());
+    const int step = event->angleDelta().y() > 0 ? -1 : 1;
+    openOffset_ =
+        std::clamp(openOffset_ + step, 0, std::max(0, rows - openVisibleRows()));
+    // The selection never leaves the window: it rides the scroll.
+    openCursor_ = std::clamp(openCursor_, openOffset_,
+                             openOffset_ + openVisibleRows() - 1);
+    update();
+    event->accept();
+    return;
+  }
   if (phase_ != Phase::Edit) {
     QWidget::wheelEvent(event);
     return;
@@ -5316,6 +5407,11 @@ void CaptureEditor::updatePointerCursor() {
   }
   if (phase_ == Phase::Select) {
     clearHighlighterPreview();
+    if (openPickerActive_) {
+      applyCursor(openRowAt(cursor_) >= 0 ? Qt::PointingHandCursor
+                                          : Qt::ArrowCursor);
+      return;
+    }
     applyCursor(windowMode_ || selectTabAt(cursor_) >= 0 ||
                         (recentsOpen_ && recentAt(cursor_) >= 0)
                     ? Qt::PointingHandCursor
@@ -5978,6 +6074,7 @@ void CaptureEditor::reopenRecent(int index) {
   reopenWatcher_.setFuture(QtConcurrent::run([recent] {
     ReopenResult result;
     result.recent = recent;
+    result.requestedPath = recent.sourcePath;
     if (!result.image.load(recent.sourcePath)) {
       result.error = QStringLiteral("Could not load that capture");
       return result;
@@ -5989,7 +6086,7 @@ void CaptureEditor::reopenRecent(int index) {
   }));
 }
 
-void CaptureEditor::completeReopenRecent(const ReopenResult &result) {
+void CaptureEditor::completeReopen(const ReopenResult &result) {
   reopenPending_ = false;
   if (result.image.isNull()) {
     setStatus(result.error.isEmpty()
@@ -5997,9 +6094,199 @@ void CaptureEditor::completeReopenRecent(const ReopenResult &result) {
                   : result.error);
     return;
   }
-  editingRecent_ = result.recent;
+  if (!result.recent.sourcePath.isEmpty()) {
+    editingRecent_ = result.recent;
+    adoptImage(result.image, result.log, SelectTab::Region,
+               QStringLiteral("Reopened recent capture · Copy/Save to output"));
+    return;
+  }
+  // A plain file open never edits a shelf entry: finishing shelves it as a
+  // fresh working document instead of replacing some other entry.
+  editingRecent_.reset();
   adoptImage(result.image, result.log, SelectTab::Region,
-             QStringLiteral("Reopened recent capture · Copy/Save to output"));
+             QStringLiteral("Opened %1 · Copy/Save to output")
+                 .arg(QFileInfo(result.requestedPath).fileName()));
+}
+
+void CaptureEditor::beginOpenPicker() {
+  if (openPickerActive_ || capturePending_ || scrollPanel_)
+    return;
+  openPickerActive_ = true;
+  openListLoading_ = true;
+  openImages_.clear();
+  openCursor_ = 0;
+  openOffset_ = 0;
+  hoveredOpenImage_ = -1;
+  setRecentsOpen(false);
+  openDirectory_ = screenshotDirectory();
+  setStatus(QStringLiteral("Opening image list…"));
+  openListWatcher_.setFuture(QtConcurrent::run([directory = openDirectory_] {
+    return listEditableImages(directory);
+  }));
+  update();
+}
+
+void CaptureEditor::closeOpenPicker() {
+  if (!openPickerActive_)
+    return;
+  openPickerActive_ = false;
+  hoveredOpenImage_ = -1;
+  setStatus(QStringLiteral("Drag to select an area · Space selects a window"));
+  update();
+}
+
+void CaptureEditor::openPickedImage(int index) {
+  if (index < 0 || index >= openImages_.size() || reopenPending_)
+    return;
+  // The picked file opens exactly like a shelved capture — image plus sidecar
+  // log on the worker pool, then the editor adopts it in place — so a saved
+  // screenshot keeps whatever layers its sidecar still knows.
+  const QString path = openImages_.at(index).path;
+  openPickerActive_ = false;
+  hoveredOpenImage_ = -1;
+  reopenPending_ = true;
+  setStatus(QStringLiteral("Opening…"));
+  reopenWatcher_.setFuture(QtConcurrent::run([path] {
+    ReopenResult result;
+    result.requestedPath = path;
+    if (!result.image.load(path)) {
+      result.error = QStringLiteral("Could not load that image");
+      return result;
+    }
+    const QString sidecar = operationLogPath(path);
+    if (QFile::exists(sidecar) &&
+        !loadOperationLog(sidecar, result.log, result.error))
+      result.image = {};
+    return result;
+  }));
+}
+
+void CaptureEditor::ensureOpenCursorVisible() {
+  const int visible = openVisibleRows();
+  if (openCursor_ < openOffset_)
+    openOffset_ = openCursor_;
+  else if (openCursor_ >= openOffset_ + visible)
+    openOffset_ = openCursor_ - visible + 1;
+  openOffset_ = std::max(0, openOffset_);
+}
+
+int CaptureEditor::openVisibleRows() const {
+  return std::max(1, std::min<int>(kOpenMaxVisibleRows, openImages_.size()));
+}
+
+QRectF CaptureEditor::openPanelRect() const {
+  const qreal w = std::min<qreal>(kOpenPanelWidth, width() - 48);
+  const qreal h = 46 + openVisibleRows() * kOpenRowHeight + 30;
+  return QRectF((width() - w) / 2.0, (height() - h) / 2.0, w, h);
+}
+
+QRectF CaptureEditor::openRowRect(int index) const {
+  const QRectF panel = openPanelRect();
+  const qreal top =
+      panel.top() + 46 + (index - openOffset_) * kOpenRowHeight + 2;
+  return QRectF(panel.left() + 12, top, panel.width() - 24,
+                kOpenRowHeight - 4);
+}
+
+int CaptureEditor::openRowAt(const QPointF &position) const {
+  const int rows = static_cast<int>(openImages_.size());
+  for (int index = openOffset_;
+       index < rows && index < openOffset_ + openVisibleRows(); ++index) {
+    if (openRowRect(index).contains(position))
+      return index;
+  }
+  return -1;
+}
+
+void CaptureEditor::paintOpenPicker(QPainter &painter) {
+  const QRectF panel = openPanelRect();
+  // A scrim separates the modal list from the frozen screen behind it.
+  painter.fillRect(rect(), QColor(0, 0, 0, 90));
+  painter.setPen(QPen(QColor(255, 255, 255, 34), 1));
+  painter.setBrush(QColor(22, 22, 28, 248));
+  painter.drawRoundedRect(panel, 9, 9);
+  painter.setFont(chromeFont(12, true));
+  painter.setPen(QColor(245, 245, 247));
+  painter.drawText(QRectF(panel.left() + 14, panel.top() + 7,
+                          panel.width() - 28, 18),
+                   Qt::AlignLeft | Qt::AlignVCenter,
+                   QStringLiteral("Open image"));
+  painter.setFont(chromeFont(10));
+  painter.setPen(QColor(255, 255, 255, 130));
+  painter.drawText(QRectF(panel.left() + 14, panel.top() + 25,
+                          panel.width() - 28, 14),
+                   Qt::AlignLeft | Qt::AlignVCenter,
+                   QFontMetrics(chromeFont(10)).elidedText(
+                       openDirectory_, Qt::ElideMiddle,
+                       qRound(panel.width()) - 28));
+  const int rows = static_cast<int>(openImages_.size());
+  if (openListLoading_ || rows == 0) {
+    painter.setFont(chromeFont(11));
+    painter.setPen(QColor(255, 255, 255, 170));
+    painter.drawText(openRowRect(openOffset_), Qt::AlignCenter,
+                     openListLoading_ ? QStringLiteral("Loading…")
+                                      : QStringLiteral("No images yet"));
+  } else {
+    QFontMetrics metrics(chromeFont(11));
+    for (int index = openOffset_;
+         index < rows && index < openOffset_ + openVisibleRows(); ++index) {
+      const EditableImage &image = openImages_.at(index);
+      const QRectF row = openRowRect(index);
+      const bool selected = index == openCursor_;
+      const bool hovered = index == hoveredOpenImage_;
+      if (selected || hovered) {
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(selected ? QColor(QStringLiteral("#0a84ff"))
+                                  : QColor(255, 255, 255, 26));
+        painter.drawRoundedRect(row, 7, 7);
+      }
+      painter.setFont(chromeFont(11, selected));
+      painter.setPen(QColor(245, 245, 247));
+      const QString age = relativeAge(image.stampMs);
+      const int ageWidth =
+          age.isEmpty() ? 0 : metrics.horizontalAdvance(age) + 8;
+      painter.drawText(row.adjusted(10, 0, -ageWidth - 10, 0),
+                       Qt::AlignLeft | Qt::AlignVCenter,
+                       metrics.elidedText(image.name, Qt::ElideMiddle,
+                                          qRound(row.width()) - ageWidth - 20));
+      if (!age.isEmpty()) {
+        painter.setPen(QColor(255, 255, 255, 140));
+        painter.drawText(row.adjusted(0, 0, -10, 0),
+                         Qt::AlignRight | Qt::AlignVCenter, age);
+      }
+    }
+    // A thin thumb shows how much of the list the window holds.
+    if (rows > openVisibleRows()) {
+      const qreal trackX = panel.right() - 5;
+      const qreal trackTop = panel.top() + 48;
+      const qreal trackH = openVisibleRows() * kOpenRowHeight - 4;
+      const qreal thumbH = trackH * openVisibleRows() / rows;
+      const qreal thumbY = trackTop +
+                           (trackH - thumbH) * openOffset_ /
+                               (rows - openVisibleRows());
+      painter.setPen(Qt::NoPen);
+      painter.setBrush(QColor(255, 255, 255, 60));
+      painter.drawRoundedRect(
+          QRectF(trackX, thumbY, 3, std::max<qreal>(thumbH, 18.0)), 1.5, 1.5);
+    }
+  }
+  painter.setFont(chromeFont(10));
+  painter.setPen(QColor(255, 255, 255, 110));
+  painter.drawText(QRectF(panel.left() + 12, panel.bottom() - 26,
+                          panel.width() - 24, 18),
+                   Qt::AlignCenter,
+                   QStringLiteral("↑↓ choose · Enter opens · Esc closes"));
+}
+
+bool CaptureEditor::waitForOpenList() {
+  // Drain on the loading flag, not just the watcher: a directory of three
+  // files can finish listing before the caller gets here, and the finished
+  // handler still needs an event-loop turn to publish its result.
+  while (openListLoading_ || openListWatcher_.isRunning()) {
+    QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+    QThread::yieldCurrentThread();
+  }
+  return !openImages_.isEmpty();
 }
 
 void CaptureEditor::selectFullscreen() {
@@ -6042,6 +6329,7 @@ void CaptureEditor::paintSelect(QPainter &painter) {
                       {QStringLiteral("Ctrl+A"), QStringLiteral("Fullscreen")},
                       {QStringLiteral("R"), QStringLiteral("Last region")},
                       {QStringLiteral("S"), QStringLiteral("Scrolling region")},
+                      {QStringLiteral("O"), QStringLiteral("Open image")},
                       {QStringLiteral("Esc"), QStringLiteral("Close")}});
 
   const bool haveHole =
@@ -6093,6 +6381,10 @@ void CaptureEditor::paintSelect(QPainter &painter) {
   drawStatusPill(painter, rect(), status_);
   if (!exporting)
     drawMeasureBadge(painter, rect(), cursor_, measurementText());
+  // Last, like any modal: the picker covers the pill and badge, not the
+  // other way round.
+  if (!exporting && openPickerActive_)
+    paintOpenPicker(painter);
 }
 
 qreal selectionBoundsRadius(const Annotation &annotation, qreal inset) {

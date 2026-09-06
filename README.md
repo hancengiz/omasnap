@@ -49,6 +49,9 @@ resizable vector layers and preserves the monitor's native pixels on scaled disp
 - A recents shelf: the select overlay stacks small cards of the last five captures
   along the right edge; hover to fan them out, click one to reopen it in the editor
   with its layers still editable instead of taking a new screenshot.
+- Open a saved screenshot back in the editor without a terminal: `O` on the
+  selection overlay lists the screenshot directory's images, newest first,
+  and Enter (or a click) reopens one for annotation.
 - Correct native-pixel export on fractional or integer-scaled monitors.
 
 ## Platform scope
@@ -254,6 +257,14 @@ error instead of opening an empty editor.
 File URLs are accepted too. A saved capture notification's "Click to edit" action launches
 `omasnap` on the finished screenshot, so it can be reopened and re-annotated.
 
+No terminal is needed either: press `O` on the selection overlay and pick from
+the screenshot directory — the same directory saves land in
+(`OMASNAP_SCREENSHOT_DIR` or the `[output] directory` config), listed newest
+first. `↑`/`↓` (or the wheel) move through the list, `Enter` (or a click)
+opens, and `Esc` backs out. A normal save writes the flattened PNG only, so a
+reopened screenshot starts with empty layers; the original vector layers stay
+on the recents shelf below.
+
 ### Recent captures
 
 Every capture finished from the editor (copied, saved, or both) keeps its working
@@ -262,6 +273,10 @@ document, source plus operation log, on a shelf of the five most recent under
 overlay shows them as a small stack of cards on the right; hovering fans them out
 and clicking one reopens that capture in the editor, undo history intact, in place
 of a new screenshot. Finishing a reopened capture replaces its shelf entry.
+
+The `O` picker, a `--file` reopen, and a shelf click all open the same editor
+surface; whichever one you use, a sidecar operation-log JSON next to the image
+(written for pins and restored when present) brings its layers back editable.
 
 ### Configuration (optional)
 
@@ -344,6 +359,7 @@ without reaching for the pointer.
 | `Space` | Step through the capture-kind tabs (Region, Window, Scrolling Region) |
 | `S` | Toggle scrolling-region mode |
 | `R` | Restore the last region drawn this session (same monitor) |
+| `O` | Open a saved image from the screenshot directory, newest first, straight in the editor |
 | `SUPER + Arrow` | Move among windows in window mode |
 | `Enter` | Capture the highlighted window |
 | `Ctrl+A` | Select the full focused monitor (the Fullscreen tab) |

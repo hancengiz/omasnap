@@ -2,9 +2,15 @@
  *  INI config. */
 #include "output-config.hpp"
 
+#include <QDateTime>
 #include <QDir>
+#include <QFileInfoList>
+#include <QImageReader>
 #include <QSettings>
 #include <QStandardPaths>
+#include <QStringList>
+
+#include <algorithm>
 
 OutputConfig loadOutputConfig(const QString &filePath) {
   OutputConfig config;
@@ -58,4 +64,40 @@ QString formatScreenshotFilename(const QString &pattern, const QDateTime &when,
 QString defaultConfigPath() {
   return QStandardPaths::writableLocation(QStandardPaths::ConfigLocation) +
          QStringLiteral("/omasnap/omasnap.conf");
+}
+
+QString screenshotDirectory() {
+  const OutputConfig config = loadOutputConfig(defaultConfigPath());
+  QString root = qEnvironmentVariable("OMASNAP_SCREENSHOT_DIR");
+  if (root.isEmpty())
+    root = config.directory;
+  if (root.isEmpty())
+    root = QDir(QStandardPaths::writableLocation(QStandardPaths::PicturesLocation))
+              .filePath(QStringLiteral("Screenshots"));
+  return root;
+}
+
+QVector<EditableImage> listEditableImages(const QString &directory) {
+  QStringList filters;
+  const QList<QByteArray> formats = QImageReader::supportedImageFormats();
+  for (const QByteArray &format : formats)
+    filters << QStringLiteral("*.") + QString::fromLatin1(format.toLower());
+  const QFileInfoList entries =
+      QDir(directory).entryInfoList(filters, QDir::Files);
+  QVector<EditableImage> images;
+  images.reserve(entries.size());
+  for (const QFileInfo &entry : entries) {
+    EditableImage image;
+    image.path = entry.absoluteFilePath();
+    image.name = entry.fileName();
+    image.stampMs = entry.lastModified().toMSecsSinceEpoch();
+    images.append(image);
+  }
+  std::sort(images.begin(), images.end(),
+            [](const EditableImage &a, const EditableImage &b) {
+              if (a.stampMs != b.stampMs)
+                return a.stampMs > b.stampMs;
+              return a.name < b.name;
+            });
+  return images;
 }

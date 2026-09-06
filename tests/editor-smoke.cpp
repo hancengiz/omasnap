@@ -3462,6 +3462,188 @@ bool runRecentsShelfSmoke(QApplication &application, QString &error) {
   return true;
 }
 
+/**
+ * The O-key open-image picker: it lists the screenshot directory newest
+ * first, keys and clicks navigate it, Esc closes it, and opening a row hands
+ * the file to the editor in place of a capture — a sidecar log next to the
+ * file keeps its layers editable, the same restore --file performs.
+ */
+bool runOpenPickerSmoke(QApplication &application, QString &error) {
+  QTemporaryDir screenshots;
+  QTemporaryDir empty;
+  if (!screenshots.isValid() || !empty.isValid()) {
+    error = QStringLiteral("Could not create screenshot directories");
+return false;
+  }
+  const QByteArray previousDir = qgetenv("OMASNAP_SCREENSHOT_DIR");
+  qputenv("OMASNAP_SCREENSHOT_DIR", screenshots.path().toUtf8());
+  const auto restoreDir = qScopeGuard([&previousDir] {
+    if (previousDir.isEmpty())
+      qunsetenv("OMASNAP_SCREENSHOT_DIR");
+    else
+      qputenv("OMASNAP_SCREENSHOT_DIR", previousDir);
+  });
+
+  // Three images with forced, distinct mtimes so "newest first" is exact.
+  struct NamedImage {
+    const char *name;
+    QRgb color;
+    int ageHours;
+  };
+  const NamedImage files[] = {
+      {"oldest.png", qRgb(255, 0, 0), 3}, {"middle.png", qRgb(0, 255, 0), 2},
+      {"newest.png", qRgb(0, 0, 255), 1}};
+  const QDateTime now = QDateTime::currentDateTime();
+  for (const NamedImage &file : files) {
+    QImage image(6, 6, QImage::Format_ARGB32);
+    image.fill(file.color);
+    const QString path =
+        QDir(screenshots.path()).filePath(QString::fromLatin1(file.name));
+    QFile written(path);
+    if (!image.save(path) || !written.open(QIODevice::ReadWrite) ||
+        !written.setFileTime(now.addSecs(-file.ageHours * 3600),
+                             QFileDevice::FileModificationTime)) {
+      error = QStringLiteral("Could not write %1").arg(file.name);
+return false;
+    }
+    written.close();
+  }
+  // A sidecar operation log next to "newest.png": one rectangle layer, the
+  // same restore --file performs.
+  {
+    OperationLog log;
+    Annotation rectangle;
+    rectangle.kind = Annotation::Kind::Rectangle;
+    rectangle.color = QColor(QStringLiteral("#0a84ff"));
+    rectangle.start = {1, 1};
+    rectangle.end = {4, 4};
+    rectangle.id = 1;
+    Operation op;
+    op.type = Operation::Type::Annotate;
+    op.annotations.append(rectangle);
+    log.ops.append(op);
+    log.index = 1;
+    log.nextId = 2;
+    QString saveError;
+    if (!saveOperationLog(
+            operationLogPath(
+                QDir(screenshots.path()).filePath(QStringLiteral("newest.png"))),
+            log, saveError)) {
+      error = QStringLiteral("Could not write the sidecar log: %1")
+                  .arg(saveError);
+return false;
+    }
+  }
+
+  CaptureData capture;
+  capture.monitor.name = QStringLiteral("TEST");
+  capture.monitor.geometry = {0, 0, 800, 600};
+  capture.monitor.pixelSize = {800, 600};
+  capture.monitor.scale = 1.0;
+  capture.source = QImage(800, 600, QImage::Format_ARGB32_Premultiplied);
+  capture.source.fill(QColor(QStringLiteral("#204060")));
+  capture.previewSize = capture.source.size();
+
+  {
+    CaptureEditor editor(capture, CaptureEditor::CaptureMode::Region);
+    editor.resize(800, 600);
+    editor.show();
+    application.processEvents();
+
+    // O opens the picker; the directory's images are listed newest first.
+    QTest::keyClick(&editor, Qt::Key_O);
+    editor.waitForOpenList();
+    if (!editor.openPickerForTest() || editor.openImageCountForTest() != 3) {
+      error = QStringLiteral("Open picker did not list the directory (%1 "
+                             "images)")
+                  .arg(editor.openImageCountForTest());
+return false;
+    }
+    const QFileInfo newest(
+        editor.openImagePathForTest(0));
+    if (newest.fileName() != QStringLiteral("newest.png")) {
+      error = QStringLiteral("Open picker is not newest first (%1)")
+                  .arg(newest.fileName());
+return false;
+    }
+    // A .json sidecar is never listed as an image.
+    for (int index = 0; index < editor.openImageCountForTest(); ++index) {
+      if (editor.openImagePathForTest(index).endsWith(QStringLiteral(".json"))) {
+        error = QStringLiteral("Open picker listed a sidecar log");
+return false;
+      }
+    }
+
+    // Esc closes without opening anything.
+    QTest::keyClick(&editor, Qt::Key_Escape);
+    application.processEvents();
+    if (editor.openPickerForTest()) {
+      error = QStringLiteral("Esc did not close the open picker");
+return false;
+    }
+
+    // O again, Down, Enter: the second-newest image opens in the editor.
+    QTest::keyClick(&editor, Qt::Key_O);
+    editor.waitForOpenList();
+    QTest::keyClick(&editor, Qt::Key_Down);
+    QTest::keyClick(&editor, Qt::Key_Return);
+    editor.waitForReopen();
+    QImage middle(6, 6, QImage::Format_ARGB32);
+    middle.fill(qRgb(0, 255, 0));
+    if (editor.openPickerForTest() || editor.selectingForTest() ||
+        editor.captureData().source.convertToFormat(
+            QImage::Format_ARGB32) != middle) {
+      error = QStringLiteral("Enter did not open the picked image");
+return false;
+    }
+    editor.close();
+  }
+
+  {
+    // The newest file carries a sidecar: its layer comes back with it.
+    CaptureEditor editor(capture, CaptureEditor::CaptureMode::Region);
+    editor.resize(800, 600);
+    editor.show();
+    application.processEvents();
+    QTest::keyClick(&editor, Qt::Key_O);
+    editor.waitForOpenList();
+    QTest::keyClick(&editor, Qt::Key_Return);
+    editor.waitForReopen();
+    if (editor.annotationCountForTest() != 1 ||
+        editor.operationLog().size() != 1) {
+      error = QStringLiteral("Sidecar layers did not come back with the file");
+return false;
+    }
+    editor.close();
+  }
+
+  {
+    // An empty directory leaves the picker up with nothing to open.
+    qputenv("OMASNAP_SCREENSHOT_DIR", empty.path().toUtf8());
+    CaptureEditor editor(capture, CaptureEditor::CaptureMode::Region);
+    editor.resize(800, 600);
+    editor.show();
+    application.processEvents();
+    QTest::keyClick(&editor, Qt::Key_O);
+    editor.waitForOpenList();
+    if (!editor.openPickerForTest() || editor.openImageCountForTest() != 0) {
+      error = QStringLiteral("Empty directory did not stay open as empty");
+return false;
+    }
+    // Enter goes nowhere; O still closes it.
+    QTest::keyClick(&editor, Qt::Key_Return);
+    application.processEvents();
+    QTest::keyClick(&editor, Qt::Key_O);
+    application.processEvents();
+    if (editor.openPickerForTest()) {
+      error = QStringLiteral("O did not close the empty picker");
+      return false;
+    }
+    editor.close();
+  }
+  return true;
+}
+
 /** Quotes the same way sendCaptureNotification builds --exec. */
 bool runShellQuoteCheck(QString &error) {
   if (shellQuote(QStringLiteral("omasnap")) != QStringLiteral("'omasnap'")) {
@@ -7909,13 +8091,13 @@ int main(int argc, char **argv) {
     qWarning().noquote() << snapshotError;
     return 89;
   }
-  if (!runOpLogSmoke(application, snapshotError)) {
-    qWarning().noquote() << snapshotError;
-    return 98;
-  }
   if (!runRecentsShelfSmoke(application, snapshotError)) {
     qWarning().noquote() << snapshotError;
     return 120;
+  }
+  if (!runOpenPickerSmoke(application, snapshotError)) {
+    qWarning().noquote() << snapshotError;
+    return 131;
   }
   if (!runShellQuoteCheck(snapshotError)) {
     qWarning().noquote() << snapshotError;
