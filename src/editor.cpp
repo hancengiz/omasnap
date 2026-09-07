@@ -788,6 +788,9 @@ CaptureEditor::CaptureEditor(CaptureData capture, CaptureMode mode,
               return;
             }
             capture_ = job.capture;
+            // A new screen capture replaces whatever file was being edited;
+            // saving it must not overwrite that file.
+            editingFilePath_.clear();
             liveMonitor_ = capture_.monitor;
             pristineSource_ = capture_.source;
             pristineLogicalSize_ = capture_.previewSize;
@@ -874,7 +877,8 @@ CaptureEditor::CaptureEditor(CaptureData capture, CaptureMode mode,
                   .arg(capture_.previewSize.width())
                   .arg(capture_.previewSize.height())
         : mode == CaptureMode::File
-            ? QStringLiteral("Editing image from file · Copy/Save to output")
+            ? QStringLiteral("Editing image from file · Save writes this "
+                             "file · Ctrl+Shift+S saves a copy")
             : QStringLiteral("Full screen selected · native resolution · "
                              "outer handles crop");
     if (mode == CaptureMode::File)
@@ -3420,7 +3424,7 @@ void CaptureEditor::paintOcrOverlay(QPainter &painter, const QRectF &image,
   painter.restore();
 }
 
-void CaptureEditor::finish(OutputMode mode) {
+void CaptureEditor::finish(OutputMode mode, bool saveAsNew) {
   if (busy_ || selection_.isEmpty())
     return;
   busy_ = true;
@@ -3439,10 +3443,21 @@ void CaptureEditor::finish(OutputMode mode) {
   const QImage backdrop = customBackdrop_;
   const QString appSlug =
       appFilenameSlug(dominantAppClass(capture_.windows, selection_));
+  // An edit opened from a file saves that file unless Save As was asked for;
+  // the log travels with it — in place or beside the Save As copy — so the
+  // next reopen still has these layers. A fresh capture keeps saving a plain
+  // timestamped PNG, as before.
+  const bool fromFileEdit = !editingFilePath_.isEmpty();
+  const QString editPath = saveAsNew ? QString() : editingFilePath_;
+  const OperationLog currentLog{ops_,          opIndex_,
+                                nextAnnotationId_, nextMarker_,
+                                pristineLogicalSize_};
   finishWatcher_.setFuture(QtConcurrent::run([captureCopy, selection,
                                               annotations, background,
                                               imageShadow, canvasBoundary,
-                                              backdrop, appSlug, mode]() {
+                                              backdrop, appSlug, mode,
+                                              editPath, fromFileEdit,
+                                              currentLog]() {
     FinishResult result;
     result.mode = mode;
     const QImage image = renderCapture(captureCopy, selection, annotations,
@@ -3469,11 +3484,30 @@ void CaptureEditor::finish(OutputMode mode) {
       }
     }
     if (mode == OutputMode::Save || mode == OutputMode::Both) {
-      result.saved = moveSnapshotToScreenshots(exportPath, error, appSlug);
-      if (result.saved.isEmpty()) {
-        QFile::remove(exportPath);
-        result.error = error;
-        return result;
+      if (!editPath.isEmpty()) {
+        if (saveSnapshotInPlace(exportPath, editPath, currentLog, error)) {
+          result.saved = editPath;
+          QFile::remove(exportPath);
+        } else {
+          QFile::remove(exportPath);
+          result.error = error;
+          return result;
+        }
+      } else {
+        result.saved = moveSnapshotToScreenshots(exportPath, error, appSlug);
+        if (result.saved.isEmpty()) {
+          QFile::remove(exportPath);
+          result.error = error;
+          return result;
+        }
+        // A Save As copy of a file edit keeps its layers; a fresh capture
+        // still saves a plain PNG.
+        if (fromFileEdit) {
+          QString logError;
+          if (!saveOperationLog(operationLogPath(result.saved), currentLog,
+                                logError))
+            qWarning().noquote() << logError;
+        }
       }
     } else {
       QFile::remove(exportPath);
@@ -3847,6 +3881,12 @@ void CaptureEditor::keyPressEvent(QKeyEvent *event) {
     undoEdit();
   } else if (event->matches(QKeySequence::Copy)) {
     finish(OutputMode::Copy);
+    return;
+  } else if (event->matches(QKeySequence::SaveAs) ||
+             (event->key() == Qt::Key_S &&
+              event->modifiers() ==
+                  (Qt::ControlModifier | Qt::ShiftModifier))) {
+    finish(OutputMode::Save, /*saveAsNew=*/true);
     return;
   } else if (event->matches(QKeySequence::Save)) {
     finish(OutputMode::Save);
@@ -5724,6 +5764,9 @@ void CaptureEditor::adoptImage(QImage image, OperationLog log, SelectTab kind,
   editingAnnotation_ = -1;
   dragging_ = false;
   interaction_ = Interaction::None;
+  // The caller re-declares a file edit right after; everything else (a
+  // stitch, a shelved capture) saves to a new screenshot.
+  editingFilePath_.clear();
   const MonitorInfo live = liveMonitor_;
   describeFileCapture(capture_, std::move(image), log);
   capture_.monitor.name = live.name;
@@ -6101,11 +6144,14 @@ void CaptureEditor::completeReopen(const ReopenResult &result) {
     return;
   }
   // A plain file open never edits a shelf entry: finishing shelves it as a
-  // fresh working document instead of replacing some other entry.
+  // fresh working document instead of replacing some other entry. Saving
+  // writes the file it was opened from.
   editingRecent_.reset();
   adoptImage(result.image, result.log, SelectTab::Region,
-             QStringLiteral("Opened %1 · Copy/Save to output")
+             QStringLiteral("Opened %1 · Save writes this file · Ctrl+Shift+S "
+                             "saves a copy")
                  .arg(QFileInfo(result.requestedPath).fileName()));
+  editingFilePath_ = result.requestedPath;
 }
 
 void CaptureEditor::beginOpenPicker() {

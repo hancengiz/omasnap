@@ -3644,6 +3644,160 @@ return false;
   return true;
 }
 
+/**
+ * Saving an edit that was opened from a file writes that same file — not a
+ * new timestamped screenshot — with an operation-log sidecar next to it, so
+ * the next open still has its layers. Ctrl+Shift+S saves a copy as a new
+ * timestamped file and leaves the original alone.
+ */
+bool runInPlaceSaveSmoke(QApplication &application, QString &error) {
+  QTemporaryDir shots;
+  if (!shots.isValid()) {
+    error = QStringLiteral("Could not create screenshot directory");
+    return false;
+  }
+  const QByteArray previousDir = qgetenv("OMASNAP_SCREENSHOT_DIR");
+  qputenv("OMASNAP_SCREENSHOT_DIR", shots.path().toUtf8());
+  const auto restoreDir = qScopeGuard([&previousDir] {
+    if (previousDir.isEmpty())
+      qunsetenv("OMASNAP_SCREENSHOT_DIR");
+    else
+      qputenv("OMASNAP_SCREENSHOT_DIR", previousDir);
+  });
+  const QString path =
+      QDir(shots.path()).filePath(QStringLiteral("annotated.png"));
+  QImage original(800, 600, QImage::Format_ARGB32);
+  original.fill(QColor(QStringLiteral("#30d158")));
+  if (!original.save(path)) {
+    error = QStringLiteral("Could not write the base image");
+    return false;
+  }
+
+  // Opens the file the way main() does for --file, annotates, saves.
+  const auto annotateAndSave = [&](bool saveAsNew, QImage &rendered) {
+    QImage diskImage(path);
+    OperationLog log;
+    {
+      const QString sidecar = operationLogPath(path);
+      QString logError;
+      if (QFile::exists(sidecar) &&
+          !loadOperationLog(sidecar, log, logError)) {
+        error = logError;
+        return false;
+      }
+    }
+    CaptureData capture;
+    describeFileCapture(capture, diskImage, log);
+    CaptureEditor editor(capture, CaptureEditor::CaptureMode::File,
+                         QuickOutputMode::None, log);
+    editor.setEditingFilePath(path);
+    editor.resize(800, 600);
+    editor.show();
+    application.processEvents();
+    if (editor.annotationCountForTest() != (saveAsNew ? 1 : 0)) {
+      error = QStringLiteral("Editor opened with unexpected layers (%1)")
+                  .arg(editor.annotationCountForTest());
+      return false;
+    }
+    QTest::keyClick(&editor, Qt::Key_A);
+    // The second pass draws clear of the restored arrow: an edge under the
+    // press grabs that layer instead of creating a new one.
+    const QPoint from(saveAsNew ? 500 : 120, 100);
+    const QPoint to(saveAsNew ? 700 : 300, 220);
+    QTest::mousePress(&editor, Qt::LeftButton, Qt::NoModifier, from);
+    QTest::mouseMove(&editor, to, 20);
+    QTest::mouseRelease(&editor, Qt::LeftButton, Qt::NoModifier, to);
+    application.processEvents();
+    if (editor.annotationCountForTest() != (saveAsNew ? 2 : 1)) {
+      error = QStringLiteral("In-place smoke could not draw an arrow (%1 "
+                             "layers, saveAsNew=%2)")
+                  .arg(editor.annotationCountForTest())
+                  .arg(saveAsNew);
+      return false;
+    }
+    rendered = editor.renderCurrentOutput();
+    if (saveAsNew)
+      QTest::keyClick(&editor, Qt::Key_S,
+                      Qt::ControlModifier | Qt::ShiftModifier);
+    else
+      QTest::keyClick(&editor, Qt::Key_S, Qt::ControlModifier);
+    editor.waitForExport();
+    editor.close();
+    return true;
+  };
+
+  QImage saved;
+  if (!annotateAndSave(false, saved))
+    return false;
+  const QStringList pngs =
+      QDir(shots.path()).entryList({QStringLiteral("*.png")}, QDir::Files);
+  if (pngs != QStringList{QStringLiteral("annotated.png")}) {
+    error = QStringLiteral("Save wrote new files instead of the opened one: %1")
+                .arg(pngs.join(QStringLiteral(", ")));
+    return false;
+  }
+  const QImage onDisk(path);
+  if (onDisk.convertToFormat(QImage::Format_ARGB32) ==
+      original.convertToFormat(QImage::Format_ARGB32)) {
+    error = QStringLiteral("Save did not change the opened file");
+    return false;
+  }
+  if (onDisk.convertToFormat(QImage::Format_ARGB32) !=
+      saved.convertToFormat(QImage::Format_ARGB32)) {
+    error = QStringLiteral("Saved file does not match the rendered output");
+    return false;
+  }
+  OperationLog sidecar;
+  {
+    QString logError;
+    if (!loadOperationLog(operationLogPath(path), sidecar, logError)) {
+      error = QStringLiteral("In-place save wrote no sidecar: %1").arg(logError);
+      return false;
+    }
+  }
+  if (sidecar.ops.size() != 1) {
+    error = QStringLiteral("Sidecar log lost the annotation (%1 ops)")
+                .arg(sidecar.ops.size());
+    return false;
+  }
+
+  // Save As: the original keeps its bytes, a new timestamped file appears.
+  const QByteArray before = QFile(path).readAll();
+  QImage second;
+  if (!annotateAndSave(true, second))
+    return false;
+  if (QFile(path).readAll() != before) {
+    error = QStringLiteral("Save As modified the original file");
+    return false;
+  }
+  const QStringList after =
+      QDir(shots.path()).entryList({QStringLiteral("*.png")}, QDir::Files);
+  if (after.size() != 2 ||
+      !after.contains(QStringLiteral("annotated.png"))) {
+    error = QStringLiteral("Save As did not write one new file: %1")
+                .arg(after.join(QStringLiteral(", ")));
+    return false;
+  }
+  const QString copyPath =
+      QDir(shots.path()).filePath(after.first() == QStringLiteral("annotated.png")
+                                      ? after.last()
+                                      : after.first());
+  OperationLog copyLog;
+  {
+    QString logError;
+    if (!loadOperationLog(operationLogPath(copyPath), copyLog, logError)) {
+      error = QStringLiteral("Save As wrote no sidecar: %1").arg(logError);
+      return false;
+    }
+  }
+  if (copyLog.ops.size() != 2) {
+    error = QStringLiteral("Save As sidecar lost layers (%1 ops)")
+                .arg(copyLog.ops.size());
+    return false;
+  }
+  return true;
+}
+
 /** Quotes the same way sendCaptureNotification builds --exec. */
 bool runShellQuoteCheck(QString &error) {
   if (shellQuote(QStringLiteral("omasnap")) != QStringLiteral("'omasnap'")) {
@@ -8102,6 +8256,10 @@ int main(int argc, char **argv) {
   if (!runShellQuoteCheck(snapshotError)) {
     qWarning().noquote() << snapshotError;
     return 83;
+  }
+  if (!runInPlaceSaveSmoke(application, snapshotError)) {
+    qWarning().noquote() << snapshotError;
+    return 133;
   }
   if (!runOpLogCapKeepsLeadingCrop(application, snapshotError)) {
     qWarning().noquote() << snapshotError;

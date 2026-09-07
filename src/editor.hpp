@@ -123,6 +123,13 @@ public:
    * for it would render the full capture for nothing and stall process exit.
    */
   void setSuppressSnapshots(bool suppress) { suppressSnapshots_ = suppress; }
+  /// Marks this edit as opened from `path` (main()'s --file flow); Save then
+  /// writes that file instead of a new timestamped screenshot.
+  void setEditingFilePath(const QString &path) { editingFilePath_ = path; }
+  /// The file Save writes back to; empty when saving creates a new file.
+  [[nodiscard]] QString editingFilePathForTest() const {
+    return editingFilePath_;
+  }
 
 protected:
   bool eventFilter(QObject *watched, QEvent *event) override;
@@ -579,7 +586,9 @@ private:
   void replayLog();
   void redoEdit();
   void selectWindowInDirection(int key);
-  void finish(OutputMode mode);
+  /// `saveAsNew` forces a fresh timestamped screenshot even when the edit
+  /// was opened from a file; otherwise Save (and Both) writes that file.
+  void finish(OutputMode mode, bool saveAsNew = false);
   void completeFinish(const FinishResult &result);
   void handleEscape();
   void handleToolbar(const QString &action);
@@ -640,6 +649,11 @@ private:
   /// Which tab produced the capture being edited; lit in the edit phase.
   SelectTab editedKind_ = SelectTab::Region;
   std::optional<RecentSnap> editingRecent_;
+  /// The file this edit was opened from (--file, Open With, the O picker);
+  /// empty for a fresh capture, the clipboard, or a shelved capture, all of
+  /// which save to a new timestamped screenshot. Cleared whenever another
+  /// image is adopted or a new screen capture lands.
+  QString editingFilePath_;
   QVector<RecentSnap> recents_;
   QFutureWatcher<QVector<RecentSnap>> recentsWatcher_;
   bool recentsLoading_ = false;

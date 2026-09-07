@@ -215,6 +215,15 @@ private:
 [[nodiscard]] QString operationLogPath(const QString &imagePath);
 [[nodiscard]] bool saveOperationLog(const QString &path, const OperationLog &log,
                                     QString &error);
+
+/// Atomically overwrites `targetPath` (the file an edit was opened from)
+/// with the rendered `sourcePath`, preserving its permissions, and writes
+/// the operation-log sidecar next to it. Sidecar failure is warned about,
+/// not fatal: the saved image wins.
+[[nodiscard]] bool saveSnapshotInPlace(const QString &sourcePath,
+                                      const QString &targetPath,
+                                      const OperationLog &log,
+                                      QString &error);
 [[nodiscard]] bool loadOperationLog(const QString &path, OperationLog &log,
                                     QString &error);
 [[nodiscard]] QString temporaryExportPath();

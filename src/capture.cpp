@@ -1384,6 +1384,46 @@ QString moveSnapshotToScreenshots(const QString &sourcePath, QString &error,
   return {};
 }
 
+bool saveSnapshotInPlace(const QString &sourcePath, const QString &targetPath,
+                         const OperationLog &log, QString &error) {
+  // An edit of an existing file saves back over it, atomically, keeping the
+  // file's own permissions rather than tightening them to the private modes
+  // used for runtime snapshots. The sidecar log follows so the next open
+  // still has its layers; a sidecar failure is warned about, not worth
+  // losing the saved image over.
+  QFile source(sourcePath);
+  if (!source.open(QIODevice::ReadOnly)) {
+    error = QStringLiteral("Could not read the rendered capture: %1")
+                .arg(sourcePath);
+    return false;
+  }
+  const QByteArray bytes = source.readAll();
+  QSaveFile file(targetPath);
+  file.setDirectWriteFallback(false);
+  QFile::Permissions permissions =
+      QFile::exists(targetPath) ? QFile::permissions(targetPath)
+      : QFile::Permissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner |
+                           QFileDevice::ReadGroup | QFileDevice::ReadOther);
+  if (permissions == QFile::Permissions{})
+    permissions = QFile::Permissions(QFileDevice::ReadOwner |
+                                     QFileDevice::WriteOwner);
+  if (!file.open(QIODevice::WriteOnly) ||
+      !file.setPermissions(permissions)) {
+    error = QStringLiteral("Could not open %1: %2")
+                .arg(targetPath, file.errorString());
+    return false;
+  }
+  if (file.write(bytes) != bytes.size() || !file.commit()) {
+    error = QStringLiteral("Could not save %1: %2")
+                .arg(targetPath, file.errorString());
+    return false;
+  }
+  QString logError;
+  if (!saveOperationLog(operationLogPath(targetPath), log, logError))
+    qWarning().noquote() << logError;
+  return true;
+}
+
 QString temporarySnapshotPath() {
   // Stable per process so repeated saves overwrite one working snapshot.
   static const quint32 nonce = QRandomGenerator::global()->generate();

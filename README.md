@@ -261,13 +261,18 @@ No terminal is needed either: press `O` on the selection overlay and pick from
 the screenshot directory — the same directory saves land in
 (`OMASNAP_SCREENSHOT_DIR` or the `[output] directory` config), listed newest
 first. `↑`/`↓` (or the wheel) move through the list, `Enter` (or a click)
-opens, and `Esc` backs out. A normal save writes the flattened PNG only, so a
-reopened screenshot starts with empty layers; the original vector layers stay
-on the recents shelf below.
+opens, and `Esc` backs out.
 
 Your file manager lists Omasnap under *Open With* for images, too: the
 desktop entry passes the clicked file straight into the editor, no terminal
 and no capture involved.
+
+Saving an edit that was opened from a file writes that same file back
+(atomically, keeping its permissions), with an operation-log sidecar next to
+it so the next reopen still has every layer. `Ctrl+Shift+S` saves a copy as a
+new timestamped screenshot instead, original untouched. Fresh captures and
+clipboard images always save to a new timestamped file; their layers stay on
+the recents shelf below.
 
 ### Recent captures
 
@@ -278,9 +283,10 @@ overlay shows them as a small stack of cards on the right; hovering fans them ou
 and clicking one reopens that capture in the editor, undo history intact, in place
 of a new screenshot. Finishing a reopened capture replaces its shelf entry.
 
-The `O` picker, a `--file` reopen, and a shelf click all open the same editor
-surface; whichever one you use, a sidecar operation-log JSON next to the image
-(written for pins and restored when present) brings its layers back editable.
+The `O` picker, a `--file` reopen, Open With, and a shelf click all open the
+same editor surface. A sidecar operation-log JSON next to an image (written
+by in-place saves, Save As copies, and pins) brings its layers back editable
+on the next open.
 
 ### Configuration (optional)
 
@@ -406,7 +412,8 @@ without reaching for the pointer.
 | `Ctrl+Z` | Undo |
 | `Ctrl+Shift+Z`, `Ctrl+Y` | Redo |
 | `Ctrl+C` | Copy PNG only |
-| `Ctrl+S` | Save PNG only |
+| `Ctrl+S` | Save PNG only — the file this edit was opened from, if any, else a new timestamped screenshot |
+| `Ctrl+Shift+S` | Save a copy as a new timestamped screenshot (Save As), original untouched |
 | `Enter` | Copy and save (with a text layer selected: edit it) |
 | `P` | Pin the capture on screen and close the editor |
 | `Esc` | Return to Select; press again to close |

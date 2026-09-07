@@ -306,6 +306,8 @@ int main(int argc, char **argv) {
   CaptureData capture;
   OperationLog restoredLog;
   QString error;
+  // The file an edit was opened from; Save writes back to it.
+  QString editingFileForSave;
   if (editingImage) {
     QImage image;
     QString inputName;
@@ -329,6 +331,7 @@ int main(int argc, char **argv) {
         return 1;
       }
       inputName = localFile;
+      editingFileForSave = localFile;
       const QString sidecar = operationLogPath(localFile);
       if (QFile::exists(sidecar) &&
           !loadOperationLog(sidecar, restoredLog, error)) {
@@ -404,6 +407,10 @@ int main(int argc, char **argv) {
   CaptureEditor editor(std::move(capture), captureMode, quickOutputMode,
                        restoredLog);
   startupTimingMark("CaptureEditor constructed");
+  // A file edit saves that file; the clipboard and fresh captures still
+  // write new timestamped screenshots.
+  if (!editingFileForSave.isEmpty())
+    editor.setEditingFilePath(editingFileForSave);
   editor.setScreen(targetScreen);
   editor.setGeometry(targetScreen->geometry());
   editor.winId();
