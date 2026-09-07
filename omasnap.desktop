@@ -2,9 +2,10 @@
 Type=Application
 Name=Omasnap
 Comment=Capture and annotate a screenshot
-Exec=omasnap
+Exec=omasnap %f
 Icon=camera-photo
 Terminal=false
 NoDisplay=true
 Categories=Graphics;
 StartupNotify=false
+MimeType=image/png;image/jpeg;image/webp;image/bmp;image/gif;

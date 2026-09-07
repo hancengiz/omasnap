@@ -265,6 +265,10 @@ opens, and `Esc` backs out. A normal save writes the flattened PNG only, so a
 reopened screenshot starts with empty layers; the original vector layers stay
 on the recents shelf below.
 
+Your file manager lists Omasnap under *Open With* for images, too: the
+desktop entry passes the clicked file straight into the editor, no terminal
+and no capture involved.
+
 ### Recent captures
 
 Every capture finished from the editor (copied, saved, or both) keeps its working
